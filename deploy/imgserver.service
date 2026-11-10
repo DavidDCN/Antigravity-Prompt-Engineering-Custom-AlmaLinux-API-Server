@@ -1,0 +1,24 @@
+[Unit]
+Description=ATTRial Image Server (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=imgserver
+Group=imgserver
+WorkingDirectory=/srv/imgserver/app
+EnvironmentFile=/etc/imgserver/imgserver.env
+ExecStart=/srv/imgserver/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers
+Restart=on-failure
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/imgserver/data
+
+[Install]
+WantedBy=multi-user.target
