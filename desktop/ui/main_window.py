@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout,
+    QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from api_client import ApiClient
@@ -18,12 +18,21 @@ ROTATE_MS = 60_000
 MAX_TEXT = 5000
 
 STYLE = """
-QFrame#panel { background: rgba(15, 18, 28, 200); border-radius: 12px; }
+QWidget#root { background: #0b0f19; }
+QFrame#panel { background: #111827; border: 1px solid #334155; border-radius: 12px; }
 QLabel, QCheckBox { color: #f0f0f0; }
-QLabel#title { font-size: 16px; font-weight: 600; }
+QLabel#title { font-size: 15px; font-weight: 600; }
+QLabel#guide {
+    background: rgba(37, 99, 235, 65);
+    border: 1px solid rgba(96, 165, 250, 120);
+    border-radius: 8px;
+    padding: 8px;
+    color: #e2e8f0;
+    font-size: 12px;
+}
 QLabel#status { color: #cfd8dc; }
 QLineEdit, QPlainTextEdit, QListWidget {
-    background: rgba(255, 255, 255, 230); color: #111; border-radius: 6px; padding: 4px;
+    background: rgba(255, 255, 255, 235); color: #111; border-radius: 6px; padding: 4px;
 }
 QPushButton {
     background: #3f6fd8; color: white; border: none; border-radius: 6px; padding: 6px 12px;
@@ -46,16 +55,17 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ATTRial Client")
-        self.resize(1100, 720)
+        self.resize(1240, 760)
         self.settings = QSettings("ATTRial", "Client")
         self.tasks = TaskRunner()
         self.api: ApiClient | None = None
         self.image_path: str | None = None
 
-        self.bg = BackgroundFrame()
-        self.bg.setStyleSheet(STYLE)
-        self.setCentralWidget(self.bg)
-        root = QVBoxLayout(self.bg)
+        central = QWidget()
+        central.setObjectName("root")
+        central.setStyleSheet(STYLE)
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
@@ -63,18 +73,21 @@ class MainWindow(QMainWindow):
         bar, bar_l = panel()
         row = QHBoxLayout()
         bar_l.addLayout(row)
-        row.addWidget(QLabel("Server:"))
-        self.url_edit = QLineEdit(self.settings.value("server_url", "http://192.168.1.50"))
+        row.addWidget(QLabel("Alma Server URL:"))
+        self.url_edit = QLineEdit(self.settings.value("server_url", "http://192.168.1.11"))
         self.url_edit.setPlaceholderText("http://<server-ip>")
         self.url_edit.returnPressed.connect(self.connect_server)
         row.addWidget(self.url_edit, 1)
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.clicked.connect(self.connect_server)
         row.addWidget(self.connect_btn)
-        self.next_bg_btn = QPushButton("Next background")
+        self.next_bg_btn = QPushButton("🎲 Random Background")
         self.next_bg_btn.clicked.connect(self.load_background)
         row.addWidget(self.next_bg_btn)
-        self.status = QLabel("Not connected")
+        self.web_gui_btn = QPushButton("🌐 Open Web GUI")
+        self.web_gui_btn.clicked.connect(self.open_web_gui)
+        row.addWidget(self.web_gui_btn)
+        self.status = QLabel("Not connected — enter your AlmaLinux VM IP (e.g. http://192.168.1.11) and click Connect.")
         self.status.setObjectName("status")
         bar_l.addWidget(self.status)
         root.addWidget(bar)
@@ -85,14 +98,22 @@ class MainWindow(QMainWindow):
 
         # --- upload panel ---
         up, up_l = panel()
-        t = QLabel("New upload")
+        t = QLabel("Step-by-Step: Upload Image or Text")
         t.setObjectName("title")
         up_l.addWidget(t)
+        guide_lbl = QLabel(
+            "1. Type a text note, choose an image (JPEG/PNG/WebP), or both.\n"
+            "2. Optional: Tick 'Also use this image as a background'.\n"
+            "3. Click Upload (POST /api/uploads → Nginx :80 → FastAPI :8000)."
+        )
+        guide_lbl.setObjectName("guide")
+        guide_lbl.setWordWrap(True)
+        up_l.addWidget(guide_lbl)
         self.text_edit = QPlainTextEdit()
-        self.text_edit.setPlaceholderText(f"Write some text (optional, max {MAX_TEXT} characters)…")
+        self.text_edit.setPlaceholderText(f"Step 1a: Write some text (optional, max {MAX_TEXT} characters)…")
         up_l.addWidget(self.text_edit, 1)
         img_row = QHBoxLayout()
-        self.choose_btn = QPushButton("Choose image…")
+        self.choose_btn = QPushButton("Step 1b: Choose image…")
         self.choose_btn.clicked.connect(self.choose_image)
         self.clear_img_btn = QPushButton("Remove image")
         self.clear_img_btn.clicked.connect(self.clear_image)
@@ -103,29 +124,70 @@ class MainWindow(QMainWindow):
         self.preview = QLabel("No image selected")
         self.preview.setObjectName("preview")
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setFixedHeight(160)
+        self.preview.setFixedHeight(140)
         up_l.addWidget(self.preview)
-        self.as_bg_check = QCheckBox("Also use this image as a background")
+        self.as_bg_check = QCheckBox("Step 2: Also use this image as an Alma Server background")
         up_l.addWidget(self.as_bg_check)
-        self.upload_btn = QPushButton("Upload")
+        self.upload_btn = QPushButton("Step 3: ⬆ Upload to Alma Server")
         self.upload_btn.clicked.connect(self.do_upload)
         up_l.addWidget(self.upload_btn)
         body.addWidget(up, 1)
 
+        # --- dedicated open background viewer frame + scrollable options ---
+        stage_pnl, stage_l = panel()
+        t_stage = QLabel("Open Background Viewer Frame")
+        t_stage.setObjectName("title")
+        stage_l.addWidget(t_stage)
+        self.frame_info = QLabel("Dedicated open space to view backgrounds and uploaded images clearly.")
+        self.frame_info.setWordWrap(True)
+        stage_l.addWidget(self.frame_info)
+
+        self.bg = BackgroundFrame(fit_mode=True)
+        self.bg.setMinimumHeight(260)
+        stage_l.addWidget(self.bg, 2)
+
+        stage_btns = QHBoxLayout()
+        self.prev_opt_btn = QPushButton("◀ Prev")
+        self.prev_opt_btn.clicked.connect(lambda: self.step_bg_option(-1))
+        self.next_opt_btn = QPushButton("Next ▶")
+        self.next_opt_btn.clicked.connect(lambda: self.step_bg_option(1))
+        self.fit_btn = QPushButton("📐 Fit / Fill")
+        self.fit_btn.clicked.connect(self.toggle_frame_fit)
+        self.refresh_bg_btn = QPushButton("↻ Refresh Options")
+        self.refresh_bg_btn.clicked.connect(self.load_backgrounds_gallery)
+        stage_btns.addWidget(self.prev_opt_btn)
+        stage_btns.addWidget(self.next_opt_btn)
+        stage_btns.addWidget(self.fit_btn)
+        stage_btns.addWidget(self.refresh_bg_btn)
+        stage_l.addLayout(stage_btns)
+
+        bg_hint = QLabel("Scroll all Server Backgrounds (click any to view in the open frame above):")
+        bg_hint.setWordWrap(True)
+        stage_l.addWidget(bg_hint)
+        self.bg_list = QListWidget()
+        self.bg_list.setIconSize(QSize(64, 64))
+        self.bg_list.setWordWrap(True)
+        self.bg_list.currentItemChanged.connect(self.apply_selected_background)
+        stage_l.addWidget(self.bg_list, 1)
+        body.addWidget(stage_pnl, 2)
+
         # --- uploads list panel ---
         lst, lst_l = panel()
-        t2 = QLabel("Recent uploads")
+        t2 = QLabel("All Database Uploads (Images & Text)")
         t2.setObjectName("title")
         lst_l.addWidget(t2)
+        up_hint = QLabel("Scroll records in /srv/imgserver/data/uploads/ (click an image upload to preview in frame):")
+        up_hint.setWordWrap(True)
+        lst_l.addWidget(up_hint)
         self.list = QListWidget()
         self.list.setIconSize(QSize(64, 64))
         self.list.setWordWrap(True)
-        self.list.currentItemChanged.connect(self._update_buttons)
+        self.list.currentItemChanged.connect(self._on_upload_selected)
         lst_l.addWidget(self.list, 1)
         lrow = QHBoxLayout()
-        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn = QPushButton("Refresh Uploads")
         self.refresh_btn.clicked.connect(self.load_uploads)
-        self.promote_btn = QPushButton("Make background")
+        self.promote_btn = QPushButton("★ Promote to Background")
         self.promote_btn.clicked.connect(self.promote_selected)
         lrow.addWidget(self.refresh_btn)
         lrow.addWidget(self.promote_btn)
@@ -144,14 +206,45 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- helpers
     def _set_connected(self, ok: bool) -> None:
-        for w in (self.next_bg_btn, self.upload_btn, self.refresh_btn, self.choose_btn,
-                  self.text_edit, self.as_bg_check):
+        for w in (self.next_bg_btn, self.upload_btn, self.refresh_btn, self.refresh_bg_btn,
+                  self.prev_opt_btn, self.next_opt_btn, self.fit_btn,
+                  self.choose_btn, self.text_edit, self.as_bg_check):
             w.setEnabled(ok)
         self._update_buttons()
         if ok:
             self.rotate_timer.start()
         else:
             self.rotate_timer.stop()
+
+    def open_web_gui(self) -> None:
+        url = self.url_edit.text().strip().rstrip("/")
+        if url and "://" not in url:
+            url = "http://" + url
+        if url:
+            QDesktopServices.openUrl(QUrl(url + "/"))
+
+    def toggle_frame_fit(self) -> None:
+        is_fit = self.bg.toggle_fit_mode()
+        self.status.setText("📐 Open Frame Mode: Fit Whole Image" if is_fit else "📐 Open Frame Mode: Fill Frame")
+
+    def step_bg_option(self, delta: int) -> None:
+        count = self.bg_list.count()
+        if count == 0:
+            return
+        idx = self.bg_list.currentRow()
+        next_idx = 0 if idx < 0 else (idx + delta) % count
+        self.bg_list.setCurrentRow(next_idx)
+
+    def _on_upload_selected(self, current: QListWidgetItem | None, *_):
+        self._update_buttons()
+        if not current:
+            return
+        payload = current.data(Qt.UserRole)
+        if isinstance(payload, dict):
+            raw = current.data(Qt.UserRole + 1)
+            if raw and self.bg.set_image(raw):
+                name = payload.get("original_name") or payload["id"][:10]
+                self.frame_info.setText(f"Viewing Upload in Open Frame: {name} (/api/uploads/{payload['id']}/image)")
 
     def _update_buttons(self, *_):
         item = self.list.currentItem()
@@ -184,6 +277,7 @@ class MainWindow(QMainWindow):
             )
             self._set_connected(True)
             self.load_background()
+            self.load_backgrounds_gallery()
             self.load_uploads()
 
         def fail(msg):
@@ -201,9 +295,11 @@ class MainWindow(QMainWindow):
         api = self.api
 
         def ok(result):
-            data, _bid = result
+            data, bid = result
             if not self.bg.set_image(data):
                 self._error("Server sent an image that could not be displayed.")
+            else:
+                self.frame_info.setText(f"Viewing Server Background ID: {bid or 'random'}")
 
         def fail(msg):
             if "404" in msg:
@@ -212,6 +308,54 @@ class MainWindow(QMainWindow):
                 self._error(msg)
 
         self.tasks.run(api.random_background, ok, fail)
+
+    def load_backgrounds_gallery(self) -> None:
+        if not self.api:
+            return
+        api = self.api
+
+        def fetch():
+            items = api.list_backgrounds()
+            thumbs = {}
+            for it in items:
+                try:
+                    thumbs[it["id"]] = api.get_bytes(it["url"])
+                except Exception:  # noqa: BLE001
+                    pass
+            return items, thumbs
+
+        def ok(result):
+            items, thumbs = result
+            self.bg_list.clear()
+            for it in items:
+                when = it["created_at"]
+                try:
+                    when = datetime.fromisoformat(when).astimezone().strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass
+                src = "Admin / Server" if it["source"] == "admin" else "★ Promoted Upload"
+                name = it["name"] or it["id"][:10]
+                item = QListWidgetItem(f"{name}\n[{src}] {when}")
+                item.setData(Qt.UserRole, (it, thumbs.get(it["id"])))
+                if it["id"] in thumbs:
+                    pm = QPixmap()
+                    if pm.loadFromData(thumbs[it["id"]]):
+                        item.setIcon(QIcon(pm))
+                self.bg_list.addItem(item)
+
+        self.tasks.run(fetch, ok, self._error)
+
+    def apply_selected_background(self, item: QListWidgetItem | None, *_) -> None:
+        if not item:
+            return
+        payload = item.data(Qt.UserRole)
+        if not payload:
+            return
+        it, raw_bytes = payload
+        if raw_bytes and self.bg.set_image(raw_bytes):
+            name = it.get("name") or it["id"]
+            self.frame_info.setText(f"Viewing Background in Open Frame: {name} ({it.get('url', '')})")
+            self.status.setText(f"✔ Displaying background in open frame: {name}")
 
     # ---------------------------------------------------------------- uploads
     def choose_image(self) -> None:
@@ -257,6 +401,8 @@ class MainWindow(QMainWindow):
             extra = " and added as background" if result.get("is_background") else ""
             self.status.setText(f"✔ Uploaded{extra}.")
             self.load_uploads()
+            if result.get("is_background"):
+                self.load_backgrounds_gallery()
 
         def fail(msg):
             self.upload_btn.setEnabled(True)
@@ -296,6 +442,7 @@ class MainWindow(QMainWindow):
                 item = QListWidgetItem(f"{label}\n{when}{tag}")
                 item.setData(Qt.UserRole, it)
                 if it["id"] in thumbs:
+                    item.setData(Qt.UserRole + 1, thumbs[it["id"]])
                     pm = QPixmap()
                     if pm.loadFromData(thumbs[it["id"]]):
                         item.setIcon(QIcon(pm))
@@ -315,5 +462,6 @@ class MainWindow(QMainWindow):
         def ok(_):
             self.status.setText("✔ Image added to backgrounds.")
             self.load_uploads()
+            self.load_backgrounds_gallery()
 
         self.tasks.run(lambda: api.promote(data["id"]), ok, self._error)

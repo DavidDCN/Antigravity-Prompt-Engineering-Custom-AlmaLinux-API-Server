@@ -90,8 +90,9 @@ sleep 2
 if curl -fsS http://127.0.0.1/api/health; then
     echo
     IP="$(hostname -I | awk '{print $1}')"
-    echo "Done. From your Windows PC, open:  http://${IP}/docs"
-    echo "Desktop app server address:        http://${IP}"
+    echo "Done. From your Windows PC, open Web GUI: http://${IP}/"
+    echo "Swagger API docs:                         http://${IP}/docs"
+    echo "Desktop app server address:               http://${IP}"
 else
     echo "Health check failed. Inspect: journalctl -u imgserver -n 50 --no-pager" >&2
     exit 1

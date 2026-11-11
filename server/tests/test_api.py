@@ -25,6 +25,28 @@ def img(data=PNG, name="pic.png"):
     return {"image": (name, io.BytesIO(data), "image/png")}
 
 
+def test_web_gui_served_at_root_and_ui(client):
+    r_root = client.get("/")
+    assert r_root.status_code == 200
+    assert "text/html" in r_root.headers["content-type"]
+    assert "ATTRial AlmaLinux Image" in r_root.text
+    assert "Open Background Viewer Frame" in r_root.text
+    r_ui = client.get("/ui")
+    assert r_ui.status_code == 200
+    assert "Alma Server Backgrounds Gallery" in r_ui.text
+
+
+def test_database_overview_and_loose_files(client):
+    # Upload one separate image so we have 1 background + 1 upload-only image
+    up = client.post("/api/uploads", data={"text": "note"}, files=img(JPEG, "only_upload.jpg")).json()
+    db_info = client.get("/api/database").json()
+    assert db_info["counts"]["backgrounds"] == 1
+    assert db_info["counts"]["uploads"] == 1
+    assert db_info["counts"]["total_images"] == 2
+    option_ids = {item["option_id"] for item in db_info["all_images"]}
+    assert f"up:{up['id']}" in option_ids
+
+
 def test_health_and_seeded_background(client):
     r = client.get("/api/health")
     assert r.status_code == 200 and r.json()["backgrounds"] == 1

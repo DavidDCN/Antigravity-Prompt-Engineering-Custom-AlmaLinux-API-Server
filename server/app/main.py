@@ -10,11 +10,12 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from . import storage
 from .config import Settings
 from .db import Database
+from .ui import WEB_GUI_HTML
 
 API_VERSION = "1.0.0"
 
@@ -27,6 +28,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.ensure_dirs()
         db = Database(settings.db_path)
         _import_loose_backgrounds(settings, db)
+        _import_loose_uploads(settings, db)
         app.state.settings = settings
         app.state.db = db
         yield
@@ -58,6 +60,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "id": row["id"],
             "name": row["name"],
+            "filename": row["filename"],
+            "content_type": row["content_type"],
+            "storage_path": f"backgrounds/{row['filename']}",
             "source": row["source"],
             "upload_id": row["upload_id"],
             "created_at": row["created_at"],
@@ -69,6 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "id": row["id"],
             "text": row["text"],
             "has_image": row["filename"] is not None,
+            "filename": row["filename"],
+            "content_type": row["content_type"],
+            "storage_path": f"uploads/{row['filename']}" if row["filename"] else None,
             "image_url": f"/api/uploads/{row['id']}/image" if row["filename"] else None,
             "original_name": row["original_name"],
             "created_at": row["created_at"],
@@ -84,14 +92,86 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Uploaded image is empty.")
         return data
 
-    # ---- routes: health --------------------------------------------------
+    # ---- routes: web gui & health ----------------------------------------
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/ui", response_class=HTMLResponse, tags=["ui"])
+    def web_gui() -> HTMLResponse:
+        return HTMLResponse(WEB_GUI_HTML)
+
     @app.get("/api/health", tags=["system"])
-    def health(db: Database = Depends(get_db)):
-        return {"status": "ok", "version": API_VERSION, "backgrounds": len(db.list_backgrounds())}
+    def health(db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
+        _import_loose_backgrounds(cfg, db)
+        _import_loose_uploads(cfg, db)
+        bgs = db.list_backgrounds()
+        ups = db.list_uploads(200, 0)
+        return {
+            "status": "ok",
+            "version": API_VERSION,
+            "backgrounds": len(bgs),
+            "uploads": len(ups),
+        }
+
+    @app.get("/api/database", tags=["system"])
+    def get_database_overview(db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
+        """Return all SQLite database records (backgrounds + uploads) and unified image options."""
+        _import_loose_backgrounds(cfg, db)
+        _import_loose_uploads(cfg, db)
+        bgs = [bg_out(r) for r in db.list_backgrounds()]
+        ups = [upload_out(r) for r in db.list_uploads(200, 0)]
+
+        all_images: list[dict[str, Any]] = []
+        for b in bgs:
+            all_images.append({
+                "option_id": f"bg:{b['id']}",
+                "id": b["id"],
+                "table": "backgrounds",
+                "name": b["name"] or b["filename"],
+                "filename": b["filename"],
+                "storage_path": b["storage_path"],
+                "content_type": b["content_type"],
+                "source": b["source"],
+                "is_background": True,
+                "upload_id": b["upload_id"],
+                "text": None,
+                "url": b["url"],
+                "created_at": b["created_at"],
+            })
+        for u in ups:
+            if u["has_image"] and not u["is_background"]:
+                all_images.append({
+                    "option_id": f"up:{u['id']}",
+                    "id": u["id"],
+                    "table": "uploads",
+                    "name": u["original_name"] or u["filename"],
+                    "filename": u["filename"],
+                    "storage_path": u["storage_path"],
+                    "content_type": u["content_type"],
+                    "source": "upload_only",
+                    "is_background": False,
+                    "upload_id": u["id"],
+                    "text": u["text"],
+                    "url": u["image_url"],
+                    "created_at": u["created_at"],
+                })
+
+        return {
+            "db_file": str(cfg.db_path),
+            "backgrounds_dir": str(cfg.backgrounds_dir),
+            "uploads_dir": str(cfg.uploads_dir),
+            "counts": {
+                "backgrounds": len(bgs),
+                "uploads": len(ups),
+                "total_images": len(all_images),
+            },
+            "backgrounds": bgs,
+            "uploads": ups,
+            "all_images": all_images,
+        }
 
     # ---- routes: backgrounds ---------------------------------------------
     @app.get("/api/backgrounds", tags=["backgrounds"])
-    def list_backgrounds(db: Database = Depends(get_db)):
+    def list_backgrounds(db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
+        _import_loose_backgrounds(cfg, db)
         return [bg_out(r) for r in db.list_backgrounds()]
 
     @app.get("/api/backgrounds/random", tags=["backgrounds"])
@@ -171,7 +251,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/uploads", tags=["uploads"])
     def list_uploads(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
-                     db: Database = Depends(get_db)):
+                     db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
+        _import_loose_uploads(cfg, db)
         return [upload_out(r) for r in db.list_uploads(limit, offset)]
 
     @app.get("/api/uploads/{upload_id}", tags=["uploads"])
@@ -233,6 +314,20 @@ def _import_loose_backgrounds(cfg: Settings, db: Database) -> None:
         except storage.InvalidImageError:
             continue
         db.add_background(path.name, ctype, path.name, "admin")
+
+
+def _import_loose_uploads(cfg: Settings, db: Database) -> None:
+    """Register image files copied straight into the uploads folder so they appear in the DB."""
+    known = db.upload_filenames()
+    for path in sorted(cfg.uploads_dir.iterdir()):
+        if not path.is_file() or path.name in known:
+            continue
+        try:
+            with path.open("rb") as f:
+                _, ctype = storage.detect_image_type(f.read(16))
+        except storage.InvalidImageError:
+            continue
+        db.add_upload(None, path.name, ctype, path.name)
 
 
 app = create_app()

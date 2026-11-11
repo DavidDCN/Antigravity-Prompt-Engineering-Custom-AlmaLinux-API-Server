@@ -44,6 +44,9 @@ class ApiClient:
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/api/health").json()
 
+    def list_backgrounds(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/api/backgrounds").json()
+
     def random_background(self) -> tuple[bytes, str | None]:
         r = self._request("GET", "/api/backgrounds/random")
         return r.content, r.headers.get("X-Background-Id")
