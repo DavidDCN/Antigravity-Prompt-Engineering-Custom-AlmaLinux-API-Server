@@ -14,11 +14,22 @@ def _default_data_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "data"
 
 
+def _default_mirror_dir() -> Path | None:
+    env_val = os.environ.get("IMGSERVER_MIRROR_DIR", "").strip()
+    if env_val:
+        return Path(env_val)
+    alma_default = Path("/home/daviddcn/Downloads/background images")
+    if alma_default.exists():
+        return alma_default
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = field(
         default_factory=lambda: Path(os.environ.get("IMGSERVER_DATA_DIR", _default_data_dir()))
     )
+    mirror_dir: Path | None = field(default_factory=_default_mirror_dir)
     api_key: str = field(default_factory=lambda: os.environ.get("IMGSERVER_API_KEY", "change-me"))
     max_upload_bytes: int = field(
         default_factory=lambda: int(os.environ.get("IMGSERVER_MAX_UPLOAD_MB", "10")) * 1024 * 1024
@@ -42,3 +53,8 @@ class Settings:
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.backgrounds_dir, self.uploads_dir):
             d.mkdir(parents=True, exist_ok=True)
+        if self.mirror_dir is not None:
+            try:
+                self.mirror_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
