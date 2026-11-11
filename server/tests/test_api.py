@@ -47,6 +47,27 @@ def test_database_overview_and_loose_files(client):
     assert f"up:{up['id']}" in option_ids
 
 
+def test_two_way_mirror_dir_sync(tmp_path):
+    data_dir = tmp_path / "data"
+    mirror_dir = tmp_path / "Downloads" / "background images"
+    mirror_dir.mkdir(parents=True)
+    # 1. Put 1.jpg and 2.jpeg inside the AlmaLinux mirror folder
+    (mirror_dir / "1.jpg").write_bytes(JPEG)
+    (mirror_dir / "2.jpeg").write_bytes(JPEG)
+
+    settings = Settings(data_dir=data_dir, mirror_dir=mirror_dir, api_key=API_KEY)
+    with TestClient(create_app(settings)) as c:
+        bgs = c.get("/api/backgrounds").json()
+        names = {b["name"] for b in bgs}
+        assert "1.jpg" in names and "2.jpeg" in names
+
+        # 2. Upload wifi.png via API -> should appear inside mirror_dir as wifi.png
+        r = c.post("/api/uploads", data={"add_as_background": "true"}, files=img(PNG, "wifi.png"))
+        assert r.status_code == 201
+        assert (mirror_dir / "wifi.png").is_file()
+        assert (mirror_dir / "wifi.png").read_bytes() == PNG
+
+
 def test_health_and_seeded_background(client):
     r = client.get("/api/health")
     assert r.status_code == 200 and r.json()["backgrounds"] == 1

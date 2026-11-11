@@ -6,7 +6,9 @@ On the VM:     managed by systemd (deploy/imgserver.service)
 from __future__ import annotations
 
 import secrets
+import shutil
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
@@ -27,8 +29,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         settings.ensure_dirs()
         db = Database(settings.db_path)
-        _import_loose_backgrounds(settings, db)
-        _import_loose_uploads(settings, db)
+        _sync_all_files(settings, db)
         app.state.settings = settings
         app.state.db = db
         yield
@@ -100,8 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health", tags=["system"])
     def health(db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
-        _import_loose_backgrounds(cfg, db)
-        _import_loose_uploads(cfg, db)
+        _sync_all_files(cfg, db)
         bgs = db.list_backgrounds()
         ups = db.list_uploads(200, 0)
         return {
@@ -109,13 +109,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "version": API_VERSION,
             "backgrounds": len(bgs),
             "uploads": len(ups),
+            "mirror_dir": str(cfg.mirror_dir) if cfg.mirror_dir else None,
         }
 
     @app.get("/api/database", tags=["system"])
     def get_database_overview(db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
         """Return all SQLite database records (backgrounds + uploads) and unified image options."""
-        _import_loose_backgrounds(cfg, db)
-        _import_loose_uploads(cfg, db)
+        _sync_all_files(cfg, db)
         bgs = [bg_out(r) for r in db.list_backgrounds()]
         ups = [upload_out(r) for r in db.list_uploads(200, 0)]
 
@@ -158,6 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "db_file": str(cfg.db_path),
             "backgrounds_dir": str(cfg.backgrounds_dir),
             "uploads_dir": str(cfg.uploads_dir),
+            "mirror_dir": str(cfg.mirror_dir) if cfg.mirror_dir else None,
             "counts": {
                 "backgrounds": len(bgs),
                 "uploads": len(ups),
@@ -171,11 +172,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---- routes: backgrounds ---------------------------------------------
     @app.get("/api/backgrounds", tags=["backgrounds"])
     def list_backgrounds(db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
-        _import_loose_backgrounds(cfg, db)
+        _sync_all_files(cfg, db)
         return [bg_out(r) for r in db.list_backgrounds()]
 
     @app.get("/api/backgrounds/random", tags=["backgrounds"])
     def random_background(db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
+        _sync_all_files(cfg, db)
         row = db.random_background()
         if not row:
             raise HTTPException(status_code=404, detail="No backgrounds available.")
@@ -203,7 +205,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             filename, ctype = storage.save_image(data, cfg.backgrounds_dir)
         except storage.InvalidImageError as e:
             raise HTTPException(status_code=415, detail=str(e))
-        return bg_out(db.add_background(filename, ctype, name or image.filename, "admin"))
+        row = db.add_background(filename, ctype, name or image.filename, "admin")
+        _sync_all_files(cfg, db)
+        return bg_out(row)
 
     @app.delete("/api/backgrounds/{background_id}", tags=["backgrounds"], status_code=204,
                 dependencies=[Depends(require_admin)])
@@ -247,12 +251,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if add_as_background and filename:
             _promote(row, db, cfg)
             row = db.get_upload(row["id"])
+        _sync_all_files(cfg, db)
         return upload_out(row)
 
     @app.get("/api/uploads", tags=["uploads"])
     def list_uploads(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
                      db: Database = Depends(get_db), cfg: Settings = Depends(get_settings)):
-        _import_loose_uploads(cfg, db)
+        _sync_all_files(cfg, db)
         return [upload_out(r) for r in db.list_uploads(limit, offset)]
 
     @app.get("/api/uploads/{upload_id}", tags=["uploads"])
@@ -281,7 +286,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         existing = db.background_for_upload(upload_id)
         if existing:
             return bg_out(existing)  # idempotent
-        return bg_out(_promote(row, db, cfg))
+        promoted = _promote(row, db, cfg)
+        _sync_all_files(cfg, db)
+        return bg_out(promoted)
 
     @app.delete("/api/uploads/{upload_id}", tags=["uploads"], status_code=204,
                 dependencies=[Depends(require_admin)])
@@ -303,15 +310,19 @@ def _promote(upload_row: dict[str, Any], db: Database, cfg: Settings) -> dict[st
 
 
 def _import_loose_backgrounds(cfg: Settings, db: Database) -> None:
-    """Register image files copied straight into the backgrounds folder (e.g. via scp)."""
+    """Register image files copied straight into the backgrounds folder (e.g. via scp or cp)."""
     known = db.background_filenames()
-    for path in sorted(cfg.backgrounds_dir.iterdir()):
+    try:
+        paths = sorted(cfg.backgrounds_dir.iterdir())
+    except OSError:
+        return
+    for path in paths:
         if not path.is_file() or path.name in known:
             continue
         try:
             with path.open("rb") as f:
                 _, ctype = storage.detect_image_type(f.read(16))
-        except storage.InvalidImageError:
+        except (OSError, storage.InvalidImageError):
             continue
         db.add_background(path.name, ctype, path.name, "admin")
 
@@ -319,15 +330,107 @@ def _import_loose_backgrounds(cfg: Settings, db: Database) -> None:
 def _import_loose_uploads(cfg: Settings, db: Database) -> None:
     """Register image files copied straight into the uploads folder so they appear in the DB."""
     known = db.upload_filenames()
-    for path in sorted(cfg.uploads_dir.iterdir()):
+    try:
+        paths = sorted(cfg.uploads_dir.iterdir())
+    except OSError:
+        return
+    for path in paths:
         if not path.is_file() or path.name in known:
             continue
         try:
             with path.open("rb") as f:
                 _, ctype = storage.detect_image_type(f.read(16))
-        except storage.InvalidImageError:
+        except (OSError, storage.InvalidImageError):
             continue
         db.add_upload(None, path.name, ctype, path.name)
+
+
+def _sync_mirror_folder(cfg: Settings, db: Database) -> None:
+    """Two-way sync between the database folders (/srv/imgserver/data/) and the user's
+    visible AlmaLinux folder (e.g. '/home/daviddcn/Downloads/background images'):
+      1. Any image placed in the AlmaLinux folder (like 1.jpg, 2.jpeg, 3.jpg) is imported
+         into backgrounds/ and metadata.db so it appears in the Web & Desktop GUI.
+      2. Any image uploaded via the Web or Desktop GUI (like wifi.png, thinking.png) is
+         mirrored into the AlmaLinux folder with its human-readable filename so the user
+         can see it in the AlmaLinux Files app too.
+    """
+    mirror = cfg.mirror_dir
+    if mirror is None:
+        return
+    try:
+        mirror.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    bgs = db.list_backgrounds()
+    ups = db.list_uploads(500, 0)
+
+    known_names: set[str] = set()
+    for b in bgs:
+        if b["name"]:
+            known_names.add(b["name"])
+            known_names.add(storage.safe_visible_filename(b["name"], Path(b["filename"]).suffix))
+        known_names.add(b["filename"])
+    for u in ups:
+        if u["original_name"]:
+            known_names.add(u["original_name"])
+            if u["filename"]:
+                known_names.add(storage.safe_visible_filename(u["original_name"], Path(u["filename"]).suffix))
+        if u["filename"]:
+            known_names.add(u["filename"])
+
+    # 1. Import any new images from the AlmaLinux folder into backgrounds/ and SQLite
+    try:
+        mirror_files = sorted(mirror.iterdir())
+    except OSError:
+        mirror_files = []
+
+    for mpath in mirror_files:
+        if not mpath.is_file() or mpath.name in known_names:
+            continue
+        try:
+            data = mpath.read_bytes()
+            filename, ctype = storage.save_image(data, cfg.backgrounds_dir)
+        except (OSError, storage.InvalidImageError):
+            continue
+        db.add_background(filename, ctype, mpath.name, "admin")
+        known_names.add(mpath.name)
+        known_names.add(filename)
+
+    # 2. Export any database images (like wifi.png, thinking.png) into the AlmaLinux folder
+    for b in db.list_backgrounds():
+        src = cfg.backgrounds_dir / b["filename"]
+        if not src.is_file():
+            continue
+        vis_name = storage.safe_visible_filename(b["name"] or b["filename"], src.suffix)
+        dst = mirror / vis_name
+        if not dst.exists():
+            try:
+                shutil.copyfile(src, dst)
+                dst.chmod(0o666)
+            except OSError:
+                pass
+
+    for u in db.list_uploads(500, 0):
+        if not u["filename"]:
+            continue
+        src = cfg.uploads_dir / u["filename"]
+        if not src.is_file():
+            continue
+        vis_name = storage.safe_visible_filename(u["original_name"] or u["filename"], src.suffix)
+        dst = mirror / vis_name
+        if not dst.exists():
+            try:
+                shutil.copyfile(src, dst)
+                dst.chmod(0o666)
+            except OSError:
+                pass
+
+
+def _sync_all_files(cfg: Settings, db: Database) -> None:
+    _import_loose_backgrounds(cfg, db)
+    _import_loose_uploads(cfg, db)
+    _sync_mirror_folder(cfg, db)
 
 
 app = create_app()
