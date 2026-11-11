@@ -82,6 +82,12 @@ class Database:
     def delete_upload(self, uid: str) -> None:
         self._exec("DELETE FROM uploads WHERE id = ?", (uid,))
 
+    def upload_filenames(self) -> set[str]:
+        return {
+            r["filename"]
+            for r in self._exec("SELECT filename FROM uploads WHERE filename IS NOT NULL")
+        }
+
     # ---- backgrounds ---------------------------------------------------
     def add_background(self, filename: str, content_type: str, name: str | None,
                        source: str, upload_id: str | None = None) -> dict[str, Any]:

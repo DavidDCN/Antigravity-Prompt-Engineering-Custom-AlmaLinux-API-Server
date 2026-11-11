@@ -90,8 +90,9 @@ backgrounds with **Make background**.
 
 ---
 
-## API reference
-Interactive docs: **`http://<server-ip>/docs`**
+## API & Web GUI reference
+- **Visual Web GUI (view backgrounds, upload images/text, live request log):** **`http://<server-ip>/`** (or `/ui`)
+- **Interactive Swagger API docs:** **`http://<server-ip>/docs`**
 
 | Method | Endpoint | Notes |
 |---|---|---|
