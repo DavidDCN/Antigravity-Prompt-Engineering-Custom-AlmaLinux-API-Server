@@ -1,23 +1,26 @@
-# ATTRial: Emulated Image Server
+# Using Antigravity Prompt Engineering to Build a Custom AlmaLinux API Server (ATTRial)
 
-An AlmaLinux VM (VirtualBox) acts as a realistic "production" server running a custom
-**Python FastAPI** API. The server hands **background images** to a **Windows desktop
-app (PySide6)**, and users upload **text and/or images** back to it. An uploaded image
-can either be kept separate or also be added to the background rotation.
+Built through **Google Antigravity prompt engineering**, this project creates and provisions a custom production-style **AlmaLinux** image and text server (**FastAPI + SQLite + Uvicorn + systemd + Nginx + SELinux + firewalld**) that users access over the network via a **REST API**, an interactive **Visual Web GUI**, and a **Windows Desktop Client (PySide6)**.
+
+An AlmaLinux VM (VirtualBox) acts as a realistic production server. Users interact with the server through HTTP API endpoints (`/api/...`), an interactive Web GUI (`/` or `/ui`), Swagger docs (`/docs`), or the compiled Windows desktop app (`ATTRialClient.exe`), uploading **text and/or images** and browsing or rotating **background images** with automatic two-way sync to the AlmaLinux `/home/daviddcn/Downloads/background images` folder.
 
 ```
-Desktop app (Windows) ──HTTP over your network──▶ AlmaLinux VM
-                                                  firewalld :80 → nginx :80 → uvicorn/FastAPI :8000 (systemd)
-                                                  /srv/imgserver/data/{backgrounds,uploads,metadata.db}
+Desktop app / Browser (Windows) ──HTTP over LAN──▶ AlmaLinux VM (192.168.1.11)
+                                                     firewalld :80 → nginx :80 → uvicorn/FastAPI :8000 (systemd)
+                                                     /srv/imgserver/data/{backgrounds,uploads,metadata.db}
+                                                     ↕ two-way sync (/home/daviddcn/Downloads/background images)
 ```
 
 ## Repository layout
 | Path | What it is |
 |---|---|
-| `server/app/` | FastAPI API (`main.py`, `db.py`, `storage.py`, `config.py`) |
-| `server/tests/` | pytest suite |
-| `deploy/` | `setup.sh` (provisioning), systemd unit, nginx config, env template |
-| `desktop/` | PySide6 desktop client |
+| `server/app/` | FastAPI API & Web GUI (`main.py`, `ui.py`, `db.py`, `storage.py`, `config.py`) |
+| `server/tests/` | `pytest` API & GUI test suite (`test_api.py`) |
+| `deploy/` | `setup.sh` (provisioning), `imgserver.service` (systemd), `nginx-imgserver.conf`, `imgserver.env.example` |
+| `deploy.ps1` | One-command Windows PowerShell deploy script (`scp` + `ssh` to run `deploy/setup.sh`) |
+| `desktop/` | PySide6 desktop client (`main.py`, `api_client.py`, `ui/`) |
+| `ATTRial_Server_Architecture_and_Debugging_Guide.pdf` | End-to-end production architecture & AlmaLinux debugging walkthrough |
+| `ATTRial_Micro_Level_Network_and_Tech_Guide.pdf` | Micro-level networking, port forwarding, Nginx, systemd, SELinux, and FastAPI guide |
 
 ---
 
@@ -39,7 +42,7 @@ Desktop app (Windows) ──HTTP over your network──▶ AlmaLinux VM
 From Windows, `ping 192.168.1.50` should now get replies.
 
 ## 2. Deploy the server to the VM
-From PowerShell on Windows, in `d:\ATTRial`:
+From PowerShell on Windows, you can run the one-command deploy script (`.\deploy.ps1`), or copy manually:
 ```powershell
 scp -r server deploy youruser@192.168.1.50:~/attrial/
 ssh youruser@192.168.1.50
@@ -50,10 +53,10 @@ cd ~/attrial
 sudo bash deploy/setup.sh
 ```
 The script installs Python, nginx and the dependencies, creates the `imgserver` service
-user, opens port 80 in firewalld, configures SELinux and starts everything. It prints the
+user, opens port 80 in firewalld, configures SELinux, syncs `/home/daviddcn/Downloads/background images`, and starts everything. It prints the
 **admin API key** (saved in `/etc/imgserver/imgserver.env`) and the URL to use.
 
-To deploy a new version, copy the files again and re-run `setup.sh`. Your data and API
+To deploy a new version, re-run `.\deploy.ps1` (or copy the files again and re-run `setup.sh`). Your data and API
 key are kept.
 
 ## 3. Add background images
@@ -96,7 +99,9 @@ backgrounds with **Make background**.
 
 | Method | Endpoint | Notes |
 |---|---|---|
-| GET | `/api/health` | status, version, background count |
+| GET | `/` or `/ui` | Interactive Visual Web GUI |
+| GET | `/api/health` | status, version, background count, upload count, mirror folder |
+| GET | `/api/database` | unified SQLite metadata & disk file overview (`backgrounds` + `uploads`) |
 | GET | `/api/backgrounds` | list (JSON) |
 | GET | `/api/backgrounds/random` | image bytes; header `X-Background-Id` |
 | GET | `/api/backgrounds/{id}` | image bytes |
@@ -109,8 +114,8 @@ backgrounds with **Make background**.
 | POST | `/api/uploads/{id}/promote` | make the uploaded image a background (calling it again is safe) |
 | DELETE | `/api/uploads/{id}` | **admin**; a promoted background copy is kept |
 
-Admin endpoints need the header `X-API-Key: <key>`. Limits: JPEG, PNG or WebP only (the
-file's actual contents are checked), 10 MB per image, 5,000 characters of text. Change
+Admin endpoints need the header `X-API-Key: <key>`. Limits: JPEG, PNG, WebP, AVIF, GIF or BMP (the
+file's actual magic-byte contents are checked), 10 MB per image, 5,000 characters of text. Change
 these in `/etc/imgserver/imgserver.env`, then run `sudo systemctl restart imgserver`.
 
 ## Local development (no VM)

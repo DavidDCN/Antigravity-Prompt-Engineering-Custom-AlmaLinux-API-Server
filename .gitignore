@@ -6,3 +6,6 @@ build/
 dist/
 *.spec
 .pytest_cache/
+.pytest_tmp/
+server/.pytest_tmp/
+server/.uv_err.log
